@@ -1,0 +1,2 @@
+# Task 1 Part A:
+For this one I was able to set it up pretty easy without any trouble. I prompted the AI by copy and pasting instructions from the Canvas directly and this produced what it needed to. It suggested that we handle any errors encountered with the API smootjly, by doing things like showing an error message instead of crashign the app. I didn't have to change anything with the code in this one to get the output I needed to meet the success criteria.
