@@ -72,7 +72,6 @@ if "active_chat_id" not in st.session_state:
 	st.session_state.active_chat_id = st.session_state.chats[0]["id"] if st.session_state.chats else None
 
 st.title("My AI Chat")
-st.write("Part C: Chat Management")
 
 # Sidebar: chat management
 st.sidebar.title("Chats")
