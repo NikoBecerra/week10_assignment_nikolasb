@@ -1,5 +1,7 @@
 import requests
 import streamlit as st
+from datetime import datetime
+from uuid import uuid4
 
 API_URL = "https://router.huggingface.co/v1/chat/completions"
 MODEL = "meta-llama/Llama-3.2-1B-Instruct"
@@ -31,12 +33,83 @@ def send_message(token: str, messages: list) -> str:
 	return data["choices"][0]["message"]["content"]
 
 
-# Initialize session state for conversation history
-if "messages" not in st.session_state:
-	st.session_state.messages = []
+def now_timestamp() -> str:
+	return datetime.now().strftime("%Y-%m-%d %H:%M")
+
+
+def create_chat() -> dict:
+	chat_id = str(uuid4())
+	return {
+		"id": chat_id,
+		"title": "New Chat",
+		"created_at": now_timestamp(),
+		"messages": [],
+	}
+
+
+def update_chat_title(chat: dict) -> None:
+	if chat["title"] == "New Chat":
+		first_user_msg = next((m["content"] for m in chat["messages"] if m["role"] == "user"), "")
+		if first_user_msg:
+			chat["title"] = first_user_msg[:40] + ("..." if len(first_user_msg) > 40 else "")
+
+
+def get_active_chat() -> dict | None:
+	active_id = st.session_state.active_chat_id
+	for chat in st.session_state.chats:
+		if chat["id"] == active_id:
+			return chat
+	return None
+
+
+# Initialize chat session state
+if "chats" not in st.session_state:
+	first_chat = create_chat()
+	st.session_state.chats = [first_chat]
+	st.session_state.active_chat_id = first_chat["id"]
+
+if "active_chat_id" not in st.session_state:
+	st.session_state.active_chat_id = st.session_state.chats[0]["id"] if st.session_state.chats else None
 
 st.title("My AI Chat")
-st.write("Part B: Multi-Turn Conversation UI")
+st.write("Part C: Chat Management")
+
+# Sidebar: chat management
+st.sidebar.title("Chats")
+if st.sidebar.button("+ New Chat", use_container_width=True):
+	new_chat = create_chat()
+	st.session_state.chats.append(new_chat)
+	st.session_state.active_chat_id = new_chat["id"]
+	st.rerun()
+
+chat_list_container = st.sidebar.container(height=450)
+with chat_list_container:
+	for chat in st.session_state.chats:
+		col_main, col_delete = st.columns([5, 1])
+		is_active = chat["id"] == st.session_state.active_chat_id
+
+		with col_main:
+			if st.button(
+				chat["title"],
+				key=f"open_{chat['id']}",
+				type="primary" if is_active else "secondary",
+				use_container_width=True,
+			):
+				st.session_state.active_chat_id = chat["id"]
+				st.rerun()
+			st.caption(chat["created_at"])
+
+		with col_delete:
+			if st.button("✕", key=f"delete_{chat['id']}", use_container_width=True):
+				deleted_was_active = chat["id"] == st.session_state.active_chat_id
+				st.session_state.chats = [c for c in st.session_state.chats if c["id"] != chat["id"]]
+
+				if deleted_was_active:
+					st.session_state.active_chat_id = (
+						st.session_state.chats[0]["id"] if st.session_state.chats else None
+					)
+
+				st.rerun()
 
 hf_token = load_hf_token()
 if not hf_token:
@@ -45,8 +118,14 @@ if not hf_token:
 	)
 	st.stop()
 
+active_chat = get_active_chat()
+
+if active_chat is None:
+	st.info("No chats yet. Create one from the sidebar.")
+	st.stop()
+
 # Display conversation history
-for message in st.session_state.messages:
+for message in active_chat["messages"]:
 	with st.chat_message(message["role"]):
 		st.write(message["content"])
 
@@ -55,15 +134,16 @@ user_input = st.chat_input("Type your message here...")
 
 if user_input:
 	# Add user message to history
-	st.session_state.messages.append({"role": "user", "content": user_input})
+	active_chat["messages"].append({"role": "user", "content": user_input})
+	update_chat_title(active_chat)
 	
 	# Send message to API with full history
 	with st.spinner("Sending message..."):
 		try:
-			assistant_response = send_message(hf_token, st.session_state.messages)
+			assistant_response = send_message(hf_token, active_chat["messages"])
 			
 			# Add assistant response to history
-			st.session_state.messages.append({"role": "assistant", "content": assistant_response})
+			active_chat["messages"].append({"role": "assistant", "content": assistant_response})
 			
 		except requests.HTTPError as http_err:
 			status = http_err.response.status_code if http_err.response is not None else "unknown"
