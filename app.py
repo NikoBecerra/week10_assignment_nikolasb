@@ -9,6 +9,7 @@ import time
 API_URL = "https://router.huggingface.co/v1/chat/completions"
 MODEL = "meta-llama/Llama-3.2-1B-Instruct"
 CHATS_DIR = Path("chats")
+MEMORY_FILE = Path("memory.json")
 
 st.set_page_config(page_title="My AI Chat", layout="wide")
 
@@ -21,6 +22,96 @@ def load_hf_token() -> str | None:
 
 	token = str(token).strip()
 	return token if token else None
+
+
+def load_memory_from_disk() -> dict:
+	if not MEMORY_FILE.exists() or MEMORY_FILE.stat().st_size == 0:
+		return {}
+
+	try:
+		with MEMORY_FILE.open("r", encoding="utf-8") as f:
+			memory = json.load(f)
+		return memory if isinstance(memory, dict) else {}
+	except (json.JSONDecodeError, OSError, TypeError, ValueError):
+		return {}
+
+
+def save_memory_to_disk(memory: dict) -> None:
+	with MEMORY_FILE.open("w", encoding="utf-8") as f:
+		json.dump(memory, f, ensure_ascii=False, indent=2)
+
+
+def merge_memory(existing: dict, new_memory: dict) -> dict:
+	merged = dict(existing)
+
+	for key, value in new_memory.items():
+		if isinstance(value, dict) and isinstance(merged.get(key), dict):
+			merged[key] = merge_memory(merged[key], value)
+		else:
+			merged[key] = value
+
+	return merged
+
+
+def build_model_messages(messages: list[dict], memory: dict) -> list[dict]:
+	if not memory:
+		return messages
+
+	memory_json = json.dumps(memory, ensure_ascii=False)
+	system_prompt = (
+		"You are a helpful AI assistant. Use the saved user memory below to personalize your replies when relevant. "
+		"Do not mention the memory store directly unless the user asks.\n\n"
+		f"Saved user memory: {memory_json}"
+	)
+	return [{"role": "system", "content": system_prompt}, *messages]
+
+
+def parse_json_object(text: str) -> dict:
+	clean_text = text.strip()
+	if clean_text.startswith("```"):
+		clean_text = clean_text.strip("`")
+		if clean_text.startswith("json"):
+			clean_text = clean_text[4:].strip()
+
+	try:
+		parsed = json.loads(clean_text)
+		return parsed if isinstance(parsed, dict) else {}
+	except json.JSONDecodeError:
+		start = clean_text.find("{")
+		end = clean_text.rfind("}")
+		if start != -1 and end != -1 and start < end:
+			try:
+				parsed = json.loads(clean_text[start : end + 1])
+				return parsed if isinstance(parsed, dict) else {}
+			except json.JSONDecodeError:
+				return {}
+	return {}
+
+
+def extract_user_memory(token: str, user_message: str) -> dict:
+	headers = {"Authorization": f"Bearer {token}"}
+	payload = {
+		"model": MODEL,
+		"messages": [
+			{
+				"role": "system",
+				"content": (
+					"Extract any durable user facts or preferences from the user's message. "
+					"Return only a JSON object. If there are no useful traits, return {}. "
+					"Prefer concise keys such as name, preferred_language, interests, communication_style, favorite_topics, or preferences. "
+					"Ignore temporary requests that are not long-term preferences."
+				),
+			},
+			{"role": "user", "content": user_message},
+		],
+		"max_tokens": 128,
+	}
+
+	response = requests.post(API_URL, headers=headers, json=payload, timeout=60)
+	response.raise_for_status()
+	data = response.json()
+	content = data["choices"][0]["message"]["content"]
+	return parse_json_object(content)
 
 
 def stream_message(token: str, messages: list):
@@ -169,6 +260,9 @@ if "chats" not in st.session_state:
 if "active_chat_id" not in st.session_state:
 	st.session_state.active_chat_id = st.session_state.chats[0]["id"] if st.session_state.chats else None
 
+if "memory" not in st.session_state:
+	st.session_state.memory = load_memory_from_disk()
+
 st.title("My AI Chat")
 
 # Sidebar: chat management
@@ -210,6 +304,17 @@ with chat_list_container:
 
 				st.rerun()
 
+with st.sidebar.expander("User Memory", expanded=False):
+	if st.session_state.memory:
+		st.json(st.session_state.memory)
+	else:
+		st.caption("No saved user memory yet.")
+
+	if st.button("Clear Memory", use_container_width=True):
+		st.session_state.memory = {}
+		save_memory_to_disk(st.session_state.memory)
+		st.rerun()
+
 hf_token = load_hf_token()
 if not hf_token:
 	st.error(
@@ -241,8 +346,10 @@ if user_input:
 		st.write(user_input)
 	
 	try:
+		model_messages = build_model_messages(active_chat["messages"], st.session_state.memory)
+
 		with st.chat_message("assistant"):
-			assistant_response = st.write_stream(stream_message(hf_token, active_chat["messages"]))
+			assistant_response = st.write_stream(stream_message(hf_token, model_messages))
 
 		if not isinstance(assistant_response, str):
 			assistant_response = "" if assistant_response is None else str(assistant_response)
@@ -250,6 +357,14 @@ if user_input:
 		# Add assistant response to history
 		active_chat["messages"].append({"role": "assistant", "content": assistant_response})
 		save_chat_to_disk(active_chat)
+
+		try:
+			extracted_memory = extract_user_memory(hf_token, user_input)
+			if extracted_memory:
+				st.session_state.memory = merge_memory(st.session_state.memory, extracted_memory)
+				save_memory_to_disk(st.session_state.memory)
+		except (requests.RequestException, KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError):
+			pass
 
 	except requests.HTTPError as http_err:
 		status = http_err.response.status_code if http_err.response is not None else "unknown"

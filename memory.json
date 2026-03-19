@@ -1,0 +1,14 @@
+{
+  "name": "John Doe",
+  "preferred_language": "English",
+  "communication_style": "Direct",
+  "favorite_topics": [
+    "Technology",
+    "Gaming"
+  ],
+  "interests": [
+    "Hiking",
+    "Reading",
+    "Traveling"
+  ]
+}
