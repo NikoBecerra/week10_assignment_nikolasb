@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 import json
+import time
 
 API_URL = "https://router.huggingface.co/v1/chat/completions"
 MODEL = "meta-llama/Llama-3.2-1B-Instruct"
@@ -22,18 +23,56 @@ def load_hf_token() -> str | None:
 	return token if token else None
 
 
-def send_message(token: str, messages: list) -> str:
+def stream_message(token: str, messages: list):
 	headers = {"Authorization": f"Bearer {token}"}
 	payload = {
 		"model": MODEL,
 		"messages": messages,
 		"max_tokens": 512,
+		"stream": True,
 	}
 
-	response = requests.post(API_URL, headers=headers, json=payload, timeout=60)
-	response.raise_for_status()
-	data = response.json()
-	return data["choices"][0]["message"]["content"]
+	with requests.post(API_URL, headers=headers, json=payload, timeout=120, stream=True) as response:
+		response.raise_for_status()
+
+		for raw_line in response.iter_lines(decode_unicode=True):
+			if not raw_line:
+				continue
+			if not raw_line.startswith("data:"):
+				continue
+
+			data_line = raw_line[5:].strip()
+			if not data_line or data_line == "[DONE]":
+				continue
+
+			try:
+				chunk = json.loads(data_line)
+			except json.JSONDecodeError:
+				continue
+
+			choices = chunk.get("choices", [])
+			if not choices:
+				continue
+
+			choice = choices[0]
+			delta = choice.get("delta", {}) if isinstance(choice, dict) else {}
+			content = delta.get("content") if isinstance(delta, dict) else None
+
+			if content is None and isinstance(choice, dict):
+				message = choice.get("message", {})
+				if isinstance(message, dict):
+					content = message.get("content")
+
+			if isinstance(content, str) and content:
+				yield content
+				time.sleep(0.02)
+			elif isinstance(content, list):
+				for part in content:
+					if isinstance(part, dict):
+						text = part.get("text")
+						if isinstance(text, str) and text:
+							yield text
+							time.sleep(0.02)
 
 
 def now_timestamp() -> str:
@@ -197,32 +236,37 @@ if user_input:
 	active_chat["messages"].append({"role": "user", "content": user_input})
 	update_chat_title(active_chat)
 	save_chat_to_disk(active_chat)
+
+	with st.chat_message("user"):
+		st.write(user_input)
 	
-	# Send message to API with full history
-	with st.spinner("Sending message..."):
-		try:
-			assistant_response = send_message(hf_token, active_chat["messages"])
-			
-			# Add assistant response to history
-			active_chat["messages"].append({"role": "assistant", "content": assistant_response})
-			save_chat_to_disk(active_chat)
-			
-		except requests.HTTPError as http_err:
-			status = http_err.response.status_code if http_err.response is not None else "unknown"
-			if status == 401:
-				st.error("Invalid token (401). Check HF_TOKEN in secrets.")
-			elif status == 429:
-				st.error("Rate limit hit (429). Please retry shortly.")
-			else:
-				st.error(f"API request failed (status {status}).")
-			detail = http_err.response.text if http_err.response is not None else str(http_err)
-			st.caption(detail)
-		except requests.RequestException as req_err:
-			st.error("Network failure while contacting Hugging Face API.")
-			st.caption(str(req_err))
-		except (KeyError, IndexError, TypeError, ValueError) as parse_err:
-			st.error("Unexpected response format from Hugging Face API.")
-			st.caption(str(parse_err))
+	try:
+		with st.chat_message("assistant"):
+			assistant_response = st.write_stream(stream_message(hf_token, active_chat["messages"]))
+
+		if not isinstance(assistant_response, str):
+			assistant_response = "" if assistant_response is None else str(assistant_response)
+
+		# Add assistant response to history
+		active_chat["messages"].append({"role": "assistant", "content": assistant_response})
+		save_chat_to_disk(active_chat)
+
+	except requests.HTTPError as http_err:
+		status = http_err.response.status_code if http_err.response is not None else "unknown"
+		if status == 401:
+			st.error("Invalid token (401). Check HF_TOKEN in secrets.")
+		elif status == 429:
+			st.error("Rate limit hit (429). Please retry shortly.")
+		else:
+			st.error(f"API request failed (status {status}).")
+		detail = http_err.response.text if http_err.response is not None else str(http_err)
+		st.caption(detail)
+	except requests.RequestException as req_err:
+		st.error("Network failure while contacting Hugging Face API.")
+		st.caption(str(req_err))
+	except (KeyError, IndexError, TypeError, ValueError) as parse_err:
+		st.error("Unexpected response format from Hugging Face API.")
+		st.caption(str(parse_err))
 	
 	st.rerun()
 
